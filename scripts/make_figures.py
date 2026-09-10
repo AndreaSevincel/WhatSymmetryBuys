@@ -1,11 +1,13 @@
 
-  #.venv/bin/python make_figures.py
+  #.venv/bin/python scripts/make_figures.py
 
-  #Regenerate the report figures from the measured numbers. Kept as a script so
+  #Regenerate the paper figures from the measured numbers. Kept as a script so
   #the figures track the results rather than drifting from them.
 
   #Source: sweep_steps.py on held-out envs 250-299 (50 envs x 10 pairs x
-  #20 samples, 8 Euler steps, K_FA=1). See main.tex Section 4 / paper.tex Section VI.
+  #20 samples, 8 Euler steps, K_FA=1). See paper/ICRA.tex Section V.
+
+import pathlib
 
 import matplotlib
 matplotlib.use("Agg")
@@ -16,6 +18,11 @@ matplotlib.use("Agg")
 matplotlib.rcParams["pdf.fonttype"] = 42
 matplotlib.rcParams["ps.fonttype"] = 42
 import matplotlib.pyplot as plt
+
+#Figures are written next to the document that includes them, so the paper
+#builds from a clean checkout without a copy step. Resolved from this file
+#rather than the cwd, so the script works from anywhere.
+PAPER = pathlib.Path(__file__).resolve().parent.parent / "paper"
 
 ENVS = [20, 60, 150, 250]
 # Every CONTROL and TREATMENT cell is a mean over three seeds; the seed spreads
@@ -463,10 +470,9 @@ def fig_cascade(path="fig_cascade.pdf"):
 
 
 if __name__ == "__main__":
-    fig_scaling()                                        # main.tex, 0.82\textwidth
-    fig_scaling("fig_scaling_col.pdf", size=(3.35, 2.45), fs=7.0)   # paper.tex, one column
-    fig_scale_conv()   # ICRA.tex: Figs 2+3 merged into one float
-    fig_mechanisms()                                     # paper.tex, figure* (both columns)
-    fig_baselines()                                      # paper.tex, one column
-    fig_convergence()                                    # paper.tex, one column
-    fig_cascade()                                        # paper.tex, figure* (both columns)
+    #Exactly the two figures ICRA.tex includes. fig_scaling, fig_mechanisms,
+    #fig_baselines and fig_convergence above are the panels drawn for longer
+    #drafts that are not part of this repository; they still build from these
+    #same numbers if called, but nothing here includes them.
+    fig_scale_conv(PAPER / "fig_scale_conv.pdf")   # Fig. 1
+    fig_cascade(PAPER / "fig_cascade.pdf")         # Fig. 2

@@ -1,110 +1,142 @@
-# PointMass3D
+# What Symmetry Buys a Learned Motion Planner
 
-Stage 1 benchmark: a 3D point-mass motion-planning environment with expert
-trajectories from classical planners (**RRT-Connect**, **CHOMP**, **TrajOpt**),
-3D collision checking, and visualization.
+Code, data and results for the paper. A start and a goal determine a frame in
+closed form. Expressing the trajectory and the obstacles in that frame removes
+five of the six degrees of freedom of SE(3) at initialisation, for one cross
+product per query and with no constraint on the architecture. This repository
+is the benchmark that measures what that is worth, the flow-matching planner it
+is measured on, and every number the paper reports.
+
+The headline: on 500 held-out problems, holding architecture, data and budget
+fixed, the frame raises the collision-free rate from **14.60%** to **51.10%**,
+where a straight segment from start to goal scores 15.6% and the world-frame
+model does not beat it.
+
+- Paper: [arXiv:2609.10033](https://arxiv.org/abs/2609.10033) — PDF and source also in [`paper/`](paper/)
+- Videos: [`media/`](media/)
+
+## Layout
+
+| path | what it holds |
+|---|---|
+| `paper/` | the submission, its figures, and the class files needed to build it |
+| `flowmatch/` | flow-matching planner: model, sampler, the frame reduction, SDF features |
+| `pointmass3d/` | the benchmark environment and the classical planners (RRT-Connect, CHOMP, TrajOpt) |
+| `se3body/` | the second domain, a rigid body whose state is a full pose |
+| `scripts/` | dataset generation, training, evaluation, baselines, figures |
+| `results/` | every measured result the paper cites, one JSON per evaluated cell |
+| `tests/` | property-based tests for the geometry and equivariance claims |
+| `docs/` | the pre-registered analysis, written before the deciding runs existed |
+| `media/` | paper and supplementary videos |
 
 ## Setup
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e .            # benchmark + classical planners
+.venv/bin/pip install -e '.[train]'   # adds torch and wandb for the planner
 ```
+
+The editable install puts `flowmatch`, `pointmass3d` and `se3body` on the path,
+so the scripts run from any directory.
+
+<details>
+<summary>Pin the CUDA wheel to your driver, or training silently runs on CPU</summary>
+
+A bare `pip install --upgrade torch` pulls whatever CUDA build is newest, and
+if that runtime is newer than the installed driver, CUDA attempts *forward
+compatibility*, which is supported only on data-centre GPUs and never on
+GeForce. On a 4090 you get `Error 804: forward compatibility was attempted on
+non supported HW`, `torch.cuda.is_available()` returns False, and training runs
+on CPU without complaining. Check `nvidia-smi` and pick the wheel:
+
+| driver | wheel |
+|---|---|
+| >= 580 | `cu130` |
+| >= 570 | `cu128` |
+| >= 560 | `cu126` |
+| >= 550 | `cu124` |
+
+```bash
+pip install "torch==2.6.*" --index-url https://download.pytorch.org/whl/cu124
+```
+
+Experiment tracking is optional: `flowmatch/tracking.py` no-ops if wandb is
+absent or unauthenticated, so training never dies on a logging problem. Run
+`wandb login` to enable it, or pass `--wandb-offline` on air-gapped nodes and
+`wandb sync` the run directories later.
+
+</details>
 
 ## Quick start
 
 ```bash
-# one problem, all three planners, comparison table + demo.png
-.venv/bin/python demo.py --seed 0
+# one problem, all three classical planners, comparison table + demo.png
+.venv/bin/python scripts/demo.py --seed 0
 
 # expert-trajectory dataset (RRT-Connect -> shortcut -> CHOMP refinement)
-.venv/bin/python generate_dataset.py --n-envs 10 --n-trajs 20 --refine chomp
+.venv/bin/python scripts/generate_dataset.py --n-envs 10 --n-trajs 20 --refine chomp
+
+# train the two arms: world frame, and the (s,g) reduction
+.venv/bin/python scripts/train_flow.py --data data --n-envs 250 --epochs 20 \
+    --out checkpoints/ctrl.pt
+.venv/bin/python scripts/train_flow.py --data data --n-envs 250 --epochs 20 \
+    --reduced --out checkpoints/treat.pt
+
+# evaluate on the held-out 500 problems (envs 250-299)
+.venv/bin/python scripts/sweep_steps.py --ckpt checkpoints/treat.pt --data data \
+    --env-start 250 --n-envs 50 --n-pairs 10 --n-samples 20 --steps 8
 ```
 
-## Environment
+`--reduced` is the whole intervention. Everything else is held fixed between
+the two arms.
 
-`PointMass3DEnv` (pointmass3d/env.py): a spherical robot (radius 0.03) in the
-workspace `[-1, 1]^3` with sphere and axis-aligned box obstacles. Collision
-checking goes through an analytic **signed distance field**, each obstacle
-implements `sdf(points)`, the environment takes the min over obstacles and the
-workspace walls, and `clearance(q) = sdf(q) - robot_radius` is positive iff q
-is collision-free. `clearance_grad` (central differences on the SDF) drives
-both optimizers. Segments/paths are validated by dense sampling.
+## Reproducing the paper
 
-## Planners (pointmass3d/planners/)
-
-- **RRT-Connect** — bidirectional tree search with a greedy connect step
-  Probabilistically complete; output is jagged, so it is post-processed 
-  with random shortcutting and arc-length resampling to a fixed number of waypoints.
-- **CHOMP** — covariant gradient descent on `F_obs + λ F_smooth`. Waypoint 
-  gradients combine the SDF hinge cost (arc-length weighted, with the curvature term)
-  and are preconditioned by the inverse
-  finite-difference metric `A⁻¹`, which spreads updates smoothly along the
-  trajectory. Local method: may need an RRT initialization in clutter.
-- **TrajOpt** — sequential convex optimization: SDF
-  constraints `clearance ≥ d_safe` are convexified via their gradient and
-  enforced through an escalating penalty loop; each convex subproblem is
-  solved in closed form with a proximal trust region. (Simplification vs. the
-  paper: squared-hinge penalties instead of L1, no external QP solver.)
-
-## Expert data pipeline
-
-`generate_dataset.py`: sample env + start/goal → RRT-Connect → shortcut →
-resample to N waypoints → refine with CHOMP/TrajOpt (initialized from the RRT
-path) → dense collision validation (fall back to the raw RRT path if the
-refined one collides). One `.npz` per environment:
-
-| key | shape | meaning |
-|---|---|---|
-| `spheres` | (S, 4) | center xyz, radius |
-| `boxes` | (B, 6) | center xyz, half-extents |
-| `trajs` | (T, N, 3) | expert trajectories |
-| `starts`, `goals` | (T, 3) | endpoints |
-
-Fixed-length, smooth, collision-free trajectories, directly usable as
-training data for diffusion / flow-matching planners (MPD, FlowMP style).
-
-## Flow-matching planner (`flowmatch/`)
-
-A **pure, non-SE(3)-equivariant flow-matching** baseline that learns to
-generate trajectories conditioned on (start, goal, obstacles):
-
-- **Prior** standard Gaussian `x0 ~ N(0, I)` over `ℝ^{N×3}` — *not* the
-  Brownian bridge in `brownian.py`.
-- **Path / target** straight-line `xt = (1-t)x0 + t x1`, velocity `u = x1 - x0`
-  (conditional OT / rectified flow); loss `‖v_θ(xt,t,c) - u‖²`.
-- **Backbone** dilated temporal ConvNet (WaveNet-style, FiLM conditioning) on
-  raw world coordinates — deliberately *not* equivariant, no canonicalization.
-- **Conditioning** start, goal, and a permutation-invariant PointNet-style
-  encoder over the sphere/box sets (generalizes to unseen obstacle layouts).
+Every number in the paper comes from a JSON file in `results/`, produced by
+`scripts/sweep_steps.py`. The figures are regenerated from those numbers:
 
 ```bash
-.venv/bin/pip install -r requirements-train.txt   # torch (use the CUDA wheel on the cluster)
-
-# train (single GPU); add --multi-gpu for DataParallel across both 4090s
-.venv/bin/python train_flow.py --data data1 --epochs 300 --batch 512 --amp
-
-# sample + evaluate against the real env (collision-free %, clearance, endpoints)
-.venv/bin/python sample_flow.py --ckpt checkpoints/flow.pt --data data1 \
-    --env-idx 0 --n-pairs 5 --n-samples 20 --plot samples.png
+.venv/bin/python scripts/make_figures.py    # writes into paper/
+cd paper && pdflatex ICRA.tex               # IEEEtran.cls ships here
 ```
 
-Sampling integrates `dx/dt = v_θ` with Euler steps from the Gaussian prior;
-`--anchor-endpoints` holds the first/last waypoints on the flow path so samples
-land exactly on start/goal (flow-matching inpainting). The checkpoint bundles
-weights, EMA weights, the normalizer and model config for standalone sampling.
+The dataset (300 environments, ~17 GB) and the trained checkpoints are not in
+git. Both regenerate deterministically from the per-environment seeds via
+`scripts/generate_dataset.py`.
 
-Push: laptop → cluster
+## The benchmark
 
-cd /home/andrea/Downloads/SJTU/PointMass3D
-rsync -avz --exclude-from=.rsync-exclude \
-  ./ andreone@10.181.6.34:/home/andreone/PointMass3D_new/
+`PointMass3DEnv` (`pointmass3d/env.py`): a spherical robot of radius 0.03 in
+`[-1, 1]^3` with sphere and oriented-box obstacles. Collision checking goes
+through an analytic signed distance field; each obstacle implements `sdf`, the
+environment takes the min over obstacles and the workspace walls, and
+`clearance(q) = sdf(q) - robot_radius` is positive iff `q` is free. Paths are
+validated by dense resampling at spacing 0.01, not at the waypoints alone.
 
+The benchmark was chosen for isolability, not difficulty: RRT-Connect solves
+99.6% of these problems in under 0.3 s on one CPU core. A point mass in a box
+is where clutter, budget, seed and representation can be varied one at a time,
+which is the only reason any number here is attributable to the representation.
 
+## Tests
 
-Pull: cluster → laptop
+```bash
+.venv/bin/python -m pytest
+```
 
+The geometry and equivariance tests run on **untrained** networks, so they
+check structural properties rather than learned ones, and include negative
+controls: a test that cannot fail is worse than no test.
 
-cd /home/andrea/Downloads/SJTU/PointMass3D
-rsync -avz andreone@10.181.6.34:/home/andreone/PointMass3D_new/checkpoints/ ./checkpoints/
-rsync -avz andreone@10.181.6.34:/home/andreone/PointMass3D_new/wandb/       
+## Citation
+
+```bibtex
+@misc{sevincel2026symmetry,
+  title         = {What Symmetry Buys a Learned Motion Planner},
+  author        = {Sevincel, Andrea Emir},
+  year          = {2026},
+  eprint        = {2609.10033},
+  archivePrefix = {arXiv}
+}
+```

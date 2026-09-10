@@ -315,7 +315,14 @@ def se3_residual(model, spheres, boxes, start, goal, reduced, k=8,
         xk = apply_points(Q, o, rep(x))
         if reduced:
             xk = apply_points(R0, origin, xk)
-        v = net.decode(xk, ts[i].expand(BK), c_k, sph_r, box_r)
+        #sph_k/box_k are the K TRANSFORMED scenes, i.e. already in the same
+        #frame as xk -- the same coupling frame_averaged_velocity relies on.
+        #Only forward them when the model consumes local geometry, so the
+        #diagnostic stubs with a 3-argument decode still run.
+        if getattr(net, "local_geom", False):
+            v = net.decode(xk, ts[i].expand(BK), c_k, sph_k, box_k)
+        else:
+            v = net.decode(xk, ts[i].expand(BK), c_k)
         if reduced:
             v = torch.einsum("bji,bkj->bki", R0, v)     # un-reduce (rotation only)
         v = torch.einsum("bji,bkj->bki", Q, v)          # un-rotate: Q^T v
