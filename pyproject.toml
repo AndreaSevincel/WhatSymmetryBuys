@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pointmass3d"
+version = "1.0.0"
+description = "What Symmetry Buys a Learned Motion Planner: benchmark, flow-matching planner and the (s,g) frame reduction"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "matplotlib"]
+
+[project.optional-dependencies]
+# torch is deliberately not a hard dependency: the benchmark and the classical
+# planners run without it, and the right torch wheel is machine-specific.
+train = ["torch>=2.2,<3", "wandb>=0.16"]
+
+[tool.setuptools]
+# The three libraries. Everything under scripts/ is a driver, not a package,
+# and is run as a file rather than imported.
+packages = ["flowmatch", "pointmass3d", "pointmass3d.planners", "se3body"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
